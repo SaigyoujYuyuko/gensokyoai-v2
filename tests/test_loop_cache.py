@@ -98,8 +98,8 @@ async def test_sync_is_idempotent():
     room.append("message", "帕秋莉", "在吗", user_id="u1")
     room.take_feed()
 
-    await loop._sync_cache()
-    await loop._sync_cache()
+    await loop.refresher.sync()
+    await loop.refresher.sync()
 
     assert mind.prompt_cache.transcript().count("帕秋莉：在吗") == 1
 
@@ -111,14 +111,14 @@ async def test_sync_waits_for_messages_arriving_during_turn():
     loop = Loop(room, mind, _Mouth(), scene=_Scene())
     room.append("message", "帕秋莉", "本轮消息")
     room.take_feed()
-    await loop._sync_cache()
+    await loop.refresher.sync()
 
     room.append("message", "帕秋莉", "等待期间的新消息")
-    await loop._sync_cache()
+    await loop.refresher.sync()
 
     assert "等待期间的新消息" not in mind.prompt_cache.transcript()
     room.take_feed()
-    await loop._sync_cache()
+    await loop.refresher.sync()
     assert mind.prompt_cache.transcript().count("等待期间的新消息") == 1
 
 
@@ -131,13 +131,13 @@ async def test_sync_waits_for_unrevealed_gap():
         room.append("message", "帕秋莉", text)
     _, gap = room.take_feed(window=1)
 
-    await loop._sync_cache()
+    await loop.refresher.sync()
 
     transcript = mind.prompt_cache.transcript()
     assert "当前" in transcript
     assert "旧一" not in transcript and "旧二" not in transcript
     room.reveal(gap["gapId"])
-    await loop._sync_cache()
+    await loop.refresher.sync()
     transcript = mind.prompt_cache.transcript()
     assert "旧一" in transcript and "旧二" in transcript
 

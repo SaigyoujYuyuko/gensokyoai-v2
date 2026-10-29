@@ -12,7 +12,7 @@ import sys
 from importlib.metadata import entry_points
 from pathlib import Path
 
-from .api import API_VERSION, drop_module, scenes
+from .apis import API_VERSION, drop_module, scenes
 from .utils.logger import LoggerManager
 
 _logger = LoggerManager.get_logger("PLUGIN")
@@ -55,8 +55,6 @@ def load(modules: list) -> dict[str, type]:
     Returns:
         dict[str, type]: 场景名 -> 场景类
     """
-    from . import scenes as _builtin  # noqa: F401  确保内置场景已注册
-
     for module in modules:
         declared = getattr(module, "API_VERSION", None)
         if declared is not None and str(declared) != API_VERSION:

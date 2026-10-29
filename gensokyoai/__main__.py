@@ -1,9 +1,11 @@
 """入口 —— 控制台聊天 / WebSocket 服务（一群一房）。
 
 用法：
-  控制台: python -m gensokyoai --character <卡面.yaml> [--scene chat] [--plugin-dir DIR]
+  控制台: python -m gensokyoai --character <卡面.yaml> [--scene 名字] [--plugin-dir DIR]
   服务:   python -m gensokyoai --character <卡面.yaml> --serve [--port 8082] [--token T]
   场景:   python -m gensokyoai --list-scenes
+
+不给 `--scene` 就是裸会话（没有场景 prompt 修饰，用默认唤醒策略）。
 """
 
 import argparse
@@ -11,8 +13,6 @@ import asyncio
 import inspect
 from pathlib import Path
 
-from . import scenes as _builtin_scenes  # noqa: F401  注册内置场景
-from .api import scenes as registered_scenes
 from .bgtasks import BgTasks
 from .character import load_card
 from .command.builtin import build_executor
@@ -206,7 +206,9 @@ async def main() -> None:
         "--window", type=int, default=30, help="一次投递给模型多少条未读"
     )
     parser.add_argument(
-        "--scene", default="chat", help="用哪个场景（见 --list-scenes）"
+        "--scene",
+        default="",
+        help="用哪个场景（见 --list-scenes）；不给就是裸会话",
     )
     parser.add_argument(
         "--llm-config",
@@ -235,13 +237,12 @@ async def main() -> None:
         for name in sorted(available):
             print(f"{name:16s} {available[name].__module__}")
         return
-    if not registered_scenes():
-        raise SystemExit("没有可用场景")
-    scene_cls = available.get(args.scene)
-    if scene_cls is None:
-        raise SystemExit(
-            f"未知场景: {args.scene!r}（可用: {', '.join(sorted(available))}）"
-        )
+    scene_cls = None
+    if args.scene:
+        scene_cls = available.get(args.scene)
+        if scene_cls is None:
+            known = ", ".join(sorted(available)) or "（没有已注册的场景）"
+            raise SystemExit(f"未知场景: {args.scene!r}（可用: {known}）")
     if not args.character:
         raise SystemExit("缺少 --character")
 

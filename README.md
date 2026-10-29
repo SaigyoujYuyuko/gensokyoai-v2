@@ -53,7 +53,7 @@ detail: |
 场景 = 这个房间是什么地方、能干什么。一个 `.py` 就是插件：
 
 ```python
-from gensokyoai.api import scene, tool
+from gensokyoai.apis import scene, tool
 
 
 @scene(name="qq", prompt="你在一个 QQ 群里。", bubbles={"max": 3, "gap_s": 0.4})
@@ -72,7 +72,8 @@ class QQScene:
 ```
 
 `--plugin-dir plugins/` 扫目录挂载，或打包时用 entry point（`gensokyoai.plugins` 组）自动发现。
-`--list-scenes` 看当前挂了哪些场景。内置 `chat` 场景开箱即用。
+`--list-scenes` 看当前挂了哪些场景。不给 `--scene` 就是裸会话——经 mouth 直接出口、
+默认连发 3 泡、用默认唤醒策略，适合当作最小起步。
 
 ## 架构一句话
 

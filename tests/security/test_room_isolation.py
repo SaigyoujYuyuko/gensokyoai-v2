@@ -33,8 +33,8 @@ async def test_prompt_cache_and_compaction_are_room_scoped():
     room_b.room.append("message", "乙", "只属于 B 房的话")
     room_a.room.take_feed()
     room_b.room.take_feed()
-    await room_a._sync_cache()
-    await room_b._sync_cache()
+    await room_a.refresher.sync()
+    await room_b.refresher.sync()
 
     transcript_a = room_a.mind.prompt_cache.transcript()
     transcript_b = room_b.mind.prompt_cache.transcript()

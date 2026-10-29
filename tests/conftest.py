@@ -2,12 +2,12 @@
 
 import pytest
 
-from gensokyoai import api
+from gensokyoai.apis.scene import _SCENES as scenes_registry
 
 
 @pytest.fixture(autouse=True)
 def _isolate_scenes():
-    saved = dict(api._SCENES)
+    saved = dict(scenes_registry)
     yield
-    api._SCENES.clear()
-    api._SCENES.update(saved)
+    scenes_registry.clear()
+    scenes_registry.update(saved)

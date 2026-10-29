@@ -1,19 +1,24 @@
-"""Agent 回合测试 —— 模型用工具决定说不说、说几条、等多久。"""
+"""Agent 回合测试 —— 走公开 API：Loop / Turn / Refresher / Room。
+
+不碰任何私有成员：制表只通过构造注入（Loop 构造参数 + 假 Mind/Mouth/Memory）
+与公开方法（notify/run/is_repeat/is_awake/turn.run/refresher.sync）完成。
+"""
 
 import asyncio
 from typing import ClassVar
 
 import pytest
 
-from gensokyoai.loop import Loop, SceneContext
+from gensokyoai.engine import Loop, Refresher, SceneContext, salvage
+from gensokyoai.llm.base import ModelError
 from gensokyoai.model import Reply, ToolCall
 from gensokyoai.room import Room
 
 
 class _ScriptedMind:
-    prompt_cache = None
     """按脚本返回动作的假心智。"""
 
+    prompt_cache = None
     name = "觉"
 
     def __init__(self, *replies: Reply) -> None:
@@ -92,13 +97,16 @@ def _quiet_scene(mouth: _Mouth, **wake) -> object:
     return _Scene(SceneContext(mouth=mouth, name="觉", room="g1", log=None))
 
 
+# Turn 自己跑一次回合 ---------------------------------------------------------
+
+
 async def test_turn_sends_what_model_says():
     """模型调 send_message -> 投递 + 入房"""
     room = _room("觉，在吗")
     mind, mouth = _ScriptedMind(_say("在。")), _Mouth()
     loop = Loop(room, mind, mouth)
 
-    await loop._turn()
+    await loop.turn.run()
 
     assert mouth.sent == [("觉", "在。")]
     assert room.events[-1].kind == "reply" and room.events[-1].text == "在。"
@@ -116,7 +124,7 @@ async def test_multiple_messages_in_one_turn():
     mouth = _Mouth()
     loop = Loop(room, _ScriptedMind(reply), mouth)
 
-    await loop._turn()
+    await loop.turn.run()
 
     assert [text for _, text in mouth.sent] == ["在。", "怎么了？"]
 
@@ -127,7 +135,7 @@ async def test_no_calls_ends_turn_silently():
     mind = _ScriptedMind(Reply(text="……"))
     loop = Loop(_room("随便说说"), mind, mouth)
 
-    await loop._turn()
+    await loop.turn.run()
 
     assert mouth.sent == []
     assert len(mind.feeds) == 1
@@ -139,7 +147,7 @@ async def test_feed_shape():
     mind = _ScriptedMind(Reply())
     loop = Loop(_room("觉，我该看什么书？"), mind, _Mouth(), memory=memory)
 
-    await loop._turn()
+    await loop.turn.run()
 
     feed = mind.feeds[0]
     assert set(feed) == {"now", "events", "gap", "history", "memories", "results"}
@@ -154,7 +162,7 @@ async def test_wait_stops_when_quiet():
     mind = _ScriptedMind(_wait(10))
     loop = Loop(_room("嗯"), mind, _Mouth())
 
-    await loop._turn()
+    await loop.turn.run()
 
     assert len(mind.feeds) == 1
 
@@ -171,7 +179,7 @@ async def test_wait_continues_when_message_arrives():
         loop.notify("message", "帕秋莉", "喂？", user_id="u1")
 
     task = asyncio.create_task(later())
-    await loop._turn()
+    await loop.turn.run()
     await task
 
     assert len(mind.feeds) == 2
@@ -195,7 +203,7 @@ async def test_read_events_reveals_gap():
     mind = _ScriptedMind(reply, Reply())
     loop = Loop(room, mind, _Mouth(), window=2)
 
-    await loop._turn()
+    await loop.turn.run()
 
     first, second = mind.feeds
     assert first["gap"]["gapId"] == 0 and first["gap"]["skipped"] == 8
@@ -213,7 +221,7 @@ async def test_memory_note_uses_message_text():
         memory=memory,
     )
 
-    await loop._turn()
+    await loop.turn.run()
 
     text, importance = memory.noted[0]
     assert text.startswith("觉，我该看什么书？")
@@ -228,9 +236,12 @@ async def test_memory_failure_does_not_block_send():
     mouth = _Mouth()
     loop = Loop(_room("在吗"), _ScriptedMind(_say("在。")), mouth, memory=memory)
 
-    await loop._turn()
+    await loop.turn.run()
 
     assert mouth.sent == [("觉", "在。")]
+
+
+# Loop 调度层 ------------------------------------------------------------------
 
 
 async def test_run_retries_after_failure():
@@ -279,18 +290,15 @@ async def test_feed_carries_recent_context(tmp_path):
     mind = _ScriptedMind(_say("在的。"), Reply())
     loop = Loop(room, mind, _Mouth())
 
-    await loop._turn()
+    await loop.turn.run()
     room.append("message", "帕秋莉", "还在吗", user_id="u1")
-    await loop._turn()
+    await loop.turn.run()
 
-    # 重启前的对话作为上下文
     assert [event["text"] for event in mind.feeds[0]["history"]] == [
         "上次说的那本书",
         "记着",
     ]
-    # 当前批次不重复出现在上下文里
     assert [event["text"] for event in mind.feeds[0]["events"]] == ["我又来了"]
-    # 第二轮：上下文接上了上一轮的问与答（更早的也在，窗口内）
     tail = [event["text"] for event in mind.feeds[1]["history"]][-2:]
     assert tail == ["我又来了", "在的。"]
     assert "还在吗" not in [event["text"] for event in mind.feeds[1]["history"]]
@@ -300,18 +308,28 @@ async def test_feed_carries_recent_context(tmp_path):
 async def test_same_line_is_not_repeated(tmp_path):
     """同一句在去重窗口里只发一次（模型抽风时的兜底）"""
     mouth = _Mouth()
+    # Mind 会给两次 same line；Turn 在第二次该被 is_repeat 栏下
+    reply = Reply(
+        calls=(
+            ToolCall(name="send_message", arguments={"text": "天人的效率总是惊人。"}),
+            ToolCall(name="send_message", arguments={"text": "天人的效率总是惊人。"}),
+            ToolCall(name="send_message", arguments={"text": "另一句。"}),
+        )
+    )
+    # 需要场景允许最多 3 个气泡才能看出 dedup 真起作用
+    mouth = _Mouth()
+    scene = _quiet_scene(mouth)
+    scene._gensokyo_scene["bubbles"] = {"max": 5, "gap_s": 0.0}
     loop = Loop(
-        _room("在吗"),
-        _ScriptedMind(Reply()),
-        mouth,
-        dedup_window=60.0,
+        _room("在吗"), _ScriptedMind(reply), mouth, scene=scene, dedup_window=60.0
     )
 
-    await loop._say([{"type": "text", "text": "天人的效率总是惊人。"}])
-    await loop._say([{"type": "text", "text": "天人的效率总是惊人。"}])
-    await loop._say([{"type": "text", "text": "另一句。"}])
+    assert loop.is_repeat("天人的效率总是惊人。") is False
+    await loop.turn.run()
 
     assert [text for _, text in mouth.sent] == ["天人的效率总是惊人。", "另一句。"]
+    assert loop.is_repeat("天人的效率总是惊人。") is True
+    assert loop.is_repeat("另一句。") is True
 
 
 async def test_unmentioned_message_does_not_wake_quiet_scene():
@@ -323,7 +341,7 @@ async def test_unmentioned_message_does_not_wake_quiet_scene():
     loop.notify("message", "帕秋莉", "今天好热", user_id="u1")
 
     assert loop.room.unread == 1, "消息照样入房，上下文不丢"
-    assert not loop._wake.is_set(), "但没醒"
+    assert not loop.is_awake, "但没醒"
 
 
 async def test_mentioned_message_always_wakes():
@@ -336,21 +354,29 @@ async def test_mentioned_message_always_wakes():
 
     loop.notify("message", "帕秋莉", "觉，在吗", user_id="u1", mentioned=True)
 
-    assert loop._wake.is_set()
+    assert loop.is_awake
 
 
 async def test_cooldown_blocks_unmentioned_after_speaking():
     """刚说过话的冷却期内，没被点名就不醒"""
     mouth = _Mouth()
     scene = _quiet_scene(mouth, on_others=1.0, cooldown_s=60.0)
-    loop = Loop(Room("g1"), _ScriptedMind(Reply()), mouth, scene=scene, rng=lambda: 0.0)
+    reply = Reply(
+        calls=(ToolCall(name="send_message", arguments={"text": "嗯。"}),)
+    )
+    room = _room("觉，在吗")  # 先进房，别让 notify 抢戏
+    loop = Loop(room, _ScriptedMind(reply), mouth, scene=scene, rng=lambda: 0.0)
 
-    await loop._say([{"type": "text", "text": "嗯。"}])
+    # 直接跑一回合让 Turn 说出"嗯。"，登记 _last_spoke
+    # （不走 notify，那样会把 _wake 置位，干扰后面"该不醒"的断言）
+    await loop.turn.run()
+    assert mouth.sent == [("觉", "嗯。")], "前一句该说出口"
+
     loop.notify("message", "帕秋莉", "随便说说", user_id="u1")
+    assert not loop.is_awake, "冷却期内没被点名就不该醒"
 
-    assert not loop._wake.is_set(), "冷却期内不许醒"
     loop.notify("message", "帕秋莉", "觉，你呢", user_id="u1", mentioned=True)
-    assert loop._wake.is_set(), "点名可以穿透冷却"
+    assert loop.is_awake, "点名可以穿透冷却"
 
 
 async def test_images_reach_the_model():
@@ -365,7 +391,7 @@ async def test_images_reach_the_model():
         user_id="u1",
         images=("data:image/png;base64,AAAA",),
     )
-    await loop._turn()
+    await loop.turn.run()
 
     assert mind.feeds[0]["events"][0]["images"] == 1
     assert mind.images[0] == [("帕秋莉 发的第 1 张图：", "data:image/png;base64,AAAA")]
@@ -378,7 +404,7 @@ async def test_prose_is_dropped_by_default():
     loop = Loop(Room("g1"), mind, mouth)
 
     loop.notify("message", "帕秋莉", "在吗", user_id="u1")
-    await loop._turn()
+    await loop.turn.run()
 
     assert mouth.sent == []
 
@@ -391,16 +417,17 @@ async def test_prose_fallback_sends_when_scene_allows():
     loop = Loop(Room("g1"), _ScriptedMind(Reply(text="绿色。")), mouth, scene=scene)
 
     loop.notify("message", "帕秋莉", "这图什么颜色", user_id="u1")
-    await loop._turn()
+    await loop.turn.run()
 
     assert mouth.sent == [("觉", "绿色。")]
     assert loop.room.events[-1].kind == "reply"
 
 
+# 文本抢救（公开 API） ---------------------------------------------------------
+
+
 def test_salvage_extracts_payload_from_fake_tool_call():
     """模型把工具调用写成正文：抢救出真正要说的话"""
-    from gensokyoai.loop import _salvage
-
     cases = {
         "send_message": "",
         "send_message text 「thsss」的复数……是「thssss」啊。": (
@@ -414,7 +441,7 @@ def test_salvage_extracts_payload_from_fake_tool_call():
         "wait": "",
     }
     for raw, want in cases.items():
-        assert _salvage(raw) == want, raw
+        assert salvage(raw) == want, raw
 
 
 async def test_protocol_leak_is_never_sent():
@@ -430,7 +457,7 @@ async def test_protocol_leak_is_never_sent():
     )
 
     loop.notify("message", "帕秋莉", "在吗", user_id="u1")
-    await loop._turn()
+    await loop.turn.run()
 
     assert mouth.sent == []
 
@@ -448,41 +475,42 @@ async def test_protocol_leak_is_salvaged_when_possible():
     )
 
     loop.notify("message", "帕秋莉", "在吗", user_id="u1")
-    await loop._turn()
+    await loop.turn.run()
 
     assert mouth.sent == [("觉", "在的。")]
 
 
-async def test_permanent_error_drops_batch_instead_of_looping():
-    """4xx 是请求本身有问题：放弃这一批，别拿它卡死房间"""
-    from gensokyoai.llm.base import ModelError
+# 失败语义 ---------------------------------------------------------------------
 
-    calls = []
 
-    class _Rejecting:
+def test_should_give_up_distinguishes_errors():
+    """4xx 是请求本身有问题：放弃；5xx / 网络抖动：重试"""
+    loop = Loop(Room("g1"), _ScriptedMind(), _Mouth())
+    assert loop.should_give_up(ModelError(400, "", "http://x")) is True
+    assert loop.should_give_up(ModelError(500, "", "http://x")) is False
+    assert loop.should_give_up(ConnectionError("断网")) is False
+
+
+async def test_permanent_error_turn_raises():
+    """带图被拒：带图问一次、被 4xx 拒、去掉图再问一次仍被拒 -> 抛出来给 Loop 决定"""
+
+    class _RejectAlways:
         prompt_cache = None
         name = "觉"
 
         async def step(self, feed, scene=None, images=None):
-            calls.append(len(feed["events"]))
             raise ModelError(400, "invalid image", "http://x")
 
     room = Room("g1")
-    room.append("message", "帕秋莉", "看这张 [图片×1]", user_id="u1")
-    loop = Loop(room, _Rejecting(), _Mouth(), retry_backoff=0.01)
+    room.append("message", "帕秋莉", "看这张", user_id="u1")
+    loop = Loop(room, _RejectAlways(), _Mouth(), retry_backoff=0.01)
 
     with pytest.raises(ModelError):
-        await loop._turn()
-
-    assert loop._give_up(ModelError(400, "", "http://x")) is True
-    assert loop._give_up(ModelError(500, "", "http://x")) is False
-    assert loop._give_up(ConnectionError("断网")) is False
+        await loop.turn.run()
 
 
 async def test_image_rejection_retries_without_images():
     """带图被端点拒（400）：去掉图再问一次，别让整轮失联"""
-    from gensokyoai.llm.base import ModelError
-
     seen = []
 
     class _Pickey:
@@ -506,10 +534,61 @@ async def test_image_rejection_retries_without_images():
     mouth = _Mouth()
     loop = Loop(room, _Pickey(), mouth)
 
-    await loop._turn()
+    await loop.turn.run()
 
     assert seen == [True, False], "先带图、再不带图"
     assert mouth.sent == [("觉", "在。")]
+
+
+# Refresher 公开 API -----------------------------------------------------------
+
+
+async def test_refresher_sync_only_advances_stable_prefix():
+    """sync 只把已处理事件推进前缀，还在 gap 里没展开的不能进前缀"""
+    cache_blocks: list[str] = []
+
+    class _Cache:
+        def add(self, line: str) -> None:
+            cache_blocks.append(line)
+
+        def stabilize(self) -> None:
+            pass
+
+        @property
+        def history_blocks(self) -> list[str]:
+            return cache_blocks
+
+        @property
+        def total_tokens(self) -> int:
+            return 0
+
+    class _CacheMind:
+        name = "觉"
+        prompt_cache = _Cache()
+
+    room = _room("第一句")
+    room.append("message", "帕秋莉", "第二句", user_id="u1")
+    # take_feed(1) 取走最新的 1 条（"第二句"），更早的"第一句"折成 gap 仍是 pending
+    room.take_feed(1)
+    refresher = Refresher(room, _CacheMind())
+
+    await refresher.sync()
+    await refresher.sync()  # 幂等：第二次不该重复推
+
+    assert cache_blocks == ["帕秋莉：第二句"], (
+        "pending 的 gap 不能推；第二句已被取走，推一次就够"
+    )
+
+
+async def test_refresher_sync_replaces_without_compact_when_cache():
+    """无缓存时 sync/maybe_compact 全是 no-op，不抛"""
+    room = _room("嗯")
+    refresher = Refresher(room, _ScriptedMind())
+    await refresher.sync()
+    assert await refresher.maybe_compact() == 0
+
+
+# 房间落盘 / 媒体回放 ----------------------------------------------------------
 
 
 async def test_images_survive_restart(tmp_path):

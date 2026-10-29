@@ -31,7 +31,10 @@ ws 连接 → Gateway（握手：频道/token/风格/房间上限）
 | 模块 | 干什么 |
 | --- | --- |
 | `room.py` | 事件流 + RoomLog 落盘回放 |
-| `loop.py` | 房间循环：唤醒、喂模型、执行动作；失败恢复批次与 gap，按原批次放弃 |
+| `engine/loop.py` | 房间调度：唤醒、退避重试、失败批次锁定；不碰回合细节 |
+| `engine/turn.py` | 一次回合的状态机：取未读 → 问模型 → 执行动作 |
+| `engine/refresher.py` | 前缀缓存同步与压缩（与"回不说话"解耦） |
+| `engine/text.py` | 纯文本 helper（salvage 等） |
 | `hub.py` | 房间注册表，一间房一个 Loop |
 | `mind.py` | 组提示词（人设 + 场景 + 机制），调模型，返回动作；每房独立缓存 |
 | `model.py` | OpenAI 兼容端点客户端，解析 tool_calls |
@@ -44,7 +47,9 @@ ws 连接 → Gateway（握手：频道/token/风格/房间上限）
 | `ws_server.py` | Gateway：握手策略 + 事件消费 |
 | `network/` | 传输层：async-iterable 事件源，不识应用层 |
 | `command/` | 斜杠命令：注册表 + 权限，/doctor /help |
-| `api.py` | 插件 API：`@scene` / `@tool`，不依赖内核 |
+| `apis/scene.py` | 插件 API：`@scene` / `@tool`，不依赖内核 |
+| `api.py` | 旧路径 re-export（向后兼容；新代码请用 `gensokyoai.apis`） |
+| `loop.py` | 旧路径 re-export（向后兼容；实现在 `engine/`） |
 | `plugin.py` | 插件发现：entry points + 目录扫描 |
 
 ## 场景
@@ -52,7 +57,8 @@ ws 连接 → Gateway（握手：频道/token/风格/房间上限）
 场景声明一个房间是什么地方、模型能用哪些动作、连发几条泡。
 内核动作只有三个：`say / wait / read_events`，场景可以只挑几个，再加自己的 `@tool`。
 
-插件只需要 `import gensokyoai.api`，不需要 import 内核。
+插件只需要 `import gensokyoai.apis`，不需要 import 内核。
+不带 `--scene` 就是裸会话（默认唤醒策略、连发 3 泡、直接经 mouth 出口）。
 
 ## 约束（写代码前读）
 

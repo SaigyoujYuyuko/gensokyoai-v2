@@ -50,7 +50,7 @@ async def test_compact_cache_replaces_old_history():
         mind.prompt_cache.add(f"甲：第{index}条" * 5)
         mind.prompt_cache.stabilize()
 
-    dropped = await loop.compact_cache(keep=3)
+    dropped = await loop.refresher.compact(keep=3)
 
     assert dropped > 0
     blocks = mind.prompt_cache.history_blocks
@@ -67,7 +67,7 @@ async def test_maybe_compact_respects_threshold():
         mind.prompt_cache.add(f"甲：短消息{index}")
     mind.prompt_cache.stabilize()
 
-    assert await loop.maybe_compact() == 0
+    assert await loop.refresher.maybe_compact() == 0
 
 
 async def test_maybe_compact_fires_over_threshold():
@@ -80,7 +80,7 @@ async def test_maybe_compact_fires_over_threshold():
         mind.prompt_cache.stabilize()
     assert mind.prompt_cache.total_tokens > mind.model.context * 0.75
 
-    assert await loop.maybe_compact() > 0
+    assert await loop.refresher.maybe_compact() > 0
 
 
 async def test_compact_without_cache_is_noop():
@@ -90,8 +90,8 @@ async def test_compact_without_cache_is_noop():
     mind.prompt_cache = None
     loop = Loop(room, mind, _Mouth(), scene=_Scene())
 
-    assert await loop.compact_cache() == 0
-    assert await loop.maybe_compact() == 0
+    assert await loop.refresher.compact() == 0
+    assert await loop.refresher.maybe_compact() == 0
 
 
 async def test_compact_survives_model_failure():
@@ -110,7 +110,7 @@ async def test_compact_survives_model_failure():
         mind.prompt_cache.add(f"甲：第{index}条" * 5)
         mind.prompt_cache.stabilize()
 
-    dropped = await loop.compact_cache(keep=2)
+    dropped = await loop.refresher.compact(keep=2)
 
     assert dropped > 0
     assert len(mind.prompt_cache.history_blocks) == 2

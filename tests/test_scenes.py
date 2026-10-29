@@ -1,7 +1,11 @@
-"""场景边界 —— 同一个 Loop 跑不同场景，回合一致、出口与策略不同。"""
+"""场景边界 —— 同一个 Loop 跑不同场景，回合一致、出口与策略不同。
 
-from gensokyoai.api import scene, tool
-from gensokyoai.loop import Loop, SceneContext
+走公开 API：Loop(scene=...) 构造 + loop.turn.run()。
+裸会话（不传 scene）也应该能用 mouth 直接说话，且默认允许连发 3 个泡。
+"""
+
+from gensokyoai.apis import scene, tool
+from gensokyoai.engine import Loop, SceneContext
 from gensokyoai.model import Reply, ToolCall
 from gensokyoai.room import Room
 
@@ -82,7 +86,7 @@ async def test_group_scene_sends_multiple_bubbles():
         _room(), _ScriptedMind(_three_says()), mouth, scene=_scene(GroupScene, mouth)
     )
 
-    await loop._turn()
+    await loop.turn.run()
 
     assert mouth.sent == ["第0句", "第1句", "第2句"]
 
@@ -94,7 +98,7 @@ async def test_tavern_scene_caps_bubbles_and_prefixes():
         _room(), _ScriptedMind(_three_says()), mouth, scene=_scene(TavernScene, mouth)
     )
 
-    await loop._turn()
+    await loop.turn.run()
 
     assert mouth.sent == ["[酒馆] 第0句"], "max=1 时多余的 send_message 被丢掉"
 
@@ -105,7 +109,7 @@ async def test_describe_reaches_the_model():
     mind = _ScriptedMind(Reply())
     loop = Loop(_room(), mind, mouth, scene=_scene(TavernScene, mouth))
 
-    await loop._turn()
+    await loop.turn.run()
 
     assert mind.feeds[0]["events"][0]["scene"] == "tavern"
 
@@ -117,16 +121,17 @@ async def test_scene_tool_result_goes_to_next_feed():
     mind = _ScriptedMind(reply, Reply())
     loop = Loop(_room(), mind, mouth, scene=_scene(TavernScene, mouth))
 
-    await loop._turn()
+    await loop.turn.run()
 
     assert mind.feeds[1]["results"] == [{"name": "帕秋莉", "text": "uid=u9"}]
 
 
-async def test_default_scene_is_builtin_chat():
-    """不传 scene 时用内置 chat 场景"""
+async def test_default_loop_without_scene_uses_mouth_directly():
+    """不传 scene（裸会话）：直接经 mouth 出口，默认允许 3 连泡"""
     mouth = _Mouth()
     loop = Loop(_room(), _ScriptedMind(_three_says()), mouth)
 
-    await loop._turn()
+    await loop.turn.run()
 
     assert mouth.sent == ["第0句", "第1句", "第2句"]
+    assert loop.scene is None

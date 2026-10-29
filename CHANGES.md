@@ -4,6 +4,21 @@
 
 整体重写，与 1.x 不兼容。1.x 历史见 git 记录。
 
+### 2.0.0.dev1（当前）—— 结构解耦
+
+- **插件 API 独立成 `gensokyoai.apis`**：`@scene` / `@tool` / `SceneContext` 从 `api.py` 搬过去；
+  旧路径 `gensokyoai.api` 改 re-export，外部插件不需要改代码
+- **删除内置 `chat` 场景**：`--scene` 不再有默认值，不给就是裸会话（默认连发 3 泡、
+  默认唤醒策略、直接经 mouth 出口）；真实场景走插件
+- **`Loop` 拆成三个协作者**（都在 `gensokyoai/engine/`）：
+  - `Loop`：调度壳——唤醒策略、退避重试、失败批次锁定、放弃判断
+  - `Turn`：一次回合的状态机（取未读 → 问模型 → 执行动作）
+  - `Refresher`：前缀缓存同步与压缩，跟"回不说话"无耦合
+- **公开访问器补齐**：`loop.turn` / `loop.refresher` / `loop.is_awake` / `loop.scene` /
+  `loop.is_repeat` / `loop.should_give_up`；测试不再依赖任何私有成员
+
+### 2.0.0.dev0
+
 ### 架构
 
 - 房间（Room）为唯一事实源：append-only 事件流，器官只依赖房间、互相不见面
